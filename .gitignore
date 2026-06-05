@@ -1,0 +1,7 @@
+Brainlat/__pycache__
+#Todos los md excepto el readme
+*.png
+brainlat_logs/
+setup.py
+*workspace
+Codigos/
