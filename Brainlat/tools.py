@@ -178,3 +178,293 @@ def scale_features(X, scale_range=(0.05, 0.95)):
     
     return X_scaled, scaler
 
+
+def compute_odds_ratios_bootstrap(X, y, covars=None, n_iterations=1000, test_size=0.2, random_state=42):
+    """
+    Compute Odds Ratios (OR) for features using bootstrap logistic regression.
+    
+    Parameters
+    ----------
+    X : pd.DataFrame
+        DataFrame with predictor features.
+    y : array-like
+        Binary target variable (0 or 1), e.g. GAP_bin.
+    covars : pd.DataFrame or pd.Series or list, optional
+        Covariates to include in the models.
+    n_iterations : int, default=1000
+        Number of bootstrap train-test split iterations.
+    test_size : float, default=0.2
+        Test split proportion for each iteration.
+    random_state : int, default=42
+        Seed for reproducibility.
+        
+    Returns
+    -------
+    df_results : pd.DataFrame
+        DataFrame with OR, 2.5% CI, 97.5% CI, beta, SE, z, and p-value.
+    """
+    from scipy.stats import norm
+    import statsmodels.api as sm
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import MinMaxScaler
+    
+    if not isinstance(y, pd.Series):
+        y = pd.Series(y, index=X.index)
+    df_results = pd.DataFrame()
+    
+    # Process covariates
+    if covars is not None:
+        if isinstance(covars, (pd.DataFrame, pd.Series)):
+            df_cov = pd.DataFrame(covars)
+        else:
+            df_cov = pd.DataFrame(covars)
+    else:
+        df_cov = None
+        
+    for feature in X.columns:
+        or_values = []
+        ci_low_values = []
+        ci_high_values = []
+        beta_values = []
+        se_values = []
+        z_values = []
+        
+        # Prepare inputs
+        X_feat = X[[feature]].copy()
+        if df_cov is not None:
+            X_model = pd.concat([X_feat, df_cov], axis=1).dropna()
+            y_model = y.loc[X_model.index]
+        else:
+            X_model = X_feat.dropna()
+            y_model = y.loc[X_model.index]
+            
+        for iteration in range(n_iterations):
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X_model, y_model, test_size=test_size, random_state=random_state + iteration
+                )
+                
+                scaler = MinMaxScaler((0.05, 0.95))
+                X_train_scaled = pd.DataFrame(
+                    scaler.fit_transform(X_train),
+                    columns=X_train.columns,
+                    index=X_train.index
+                )
+                
+                X_train_scaled["intercept"] = 1
+                
+                # Fit logistic regression
+                model = sm.Logit(y_train, X_train_scaled).fit(disp=0)
+                
+                params = model.params
+                conf = np.exp(model.conf_int())
+                conf["OR"] = np.exp(params)
+                conf["z"] = model.tvalues
+                conf["P>|z|"] = model.pvalues
+                conf.columns = ["2.5%", "97.5%", "OR", "z", "P>|z|"]
+                
+                or_values.append(conf.loc[feature, "OR"])
+                ci_low_values.append(conf.loc[feature, "2.5%"])
+                ci_high_values.append(conf.loc[feature, "97.5%"])
+                beta_values.append(model.params[feature])
+                se_values.append(model.bse[feature])
+                z_values.append(model.tvalues[feature])
+                
+            except Exception:
+                continue
+                
+        if len(or_values) > 1:
+            or_values = np.array(or_values)
+            ci_low_values = np.array(ci_low_values)
+            ci_high_values = np.array(ci_high_values)
+            beta_values = np.array(beta_values)
+            se_values = np.array(se_values)
+            
+            or_mean = np.mean(or_values)
+            ci_low_mean = np.mean(ci_low_values)
+            ci_high_mean = np.mean(ci_high_values)
+            beta_mean = np.mean(beta_values)
+            se_mean = np.mean(se_values)
+            
+            z_combined = beta_mean / se_mean
+            p_combined = 2 * (1 - norm.cdf(abs(z_combined)))
+            z_mean_original = np.mean(z_values)
+        else:
+            ci_low_mean = np.nan
+            ci_high_mean = np.nan
+            or_mean = np.nan
+            beta_mean = np.nan
+            se_mean = np.nan
+            z_combined = np.nan
+            p_combined = np.nan
+            z_mean_original = np.nan
+            
+        df_temp = pd.DataFrame({
+            "Feature": [feature],
+            "2.5%": [ci_low_mean],
+            "97.5%": [ci_high_mean],
+            "OR": [or_mean],
+            "beta_mean": [beta_mean],
+            "SE_mean": [se_mean],
+            "z": [z_combined],
+            "P>|z|": [f"{p_combined:.2e}" if not np.isnan(p_combined) else np.nan],
+            "z_mean_original": [z_mean_original],
+            "n_iterations_ok": [len(or_values)]
+        })
+        df_results = pd.concat([df_results, df_temp], ignore_index=True)
+        
+    return df_results
+
+
+def compute_relative_risks_bootstrap(X, y_gap_corrected, delta_time, covars=None, n_iterations=1000, test_size=0.2, random_state=42):
+    """
+    Compute Relative Risks (RR) using bootstrap GLM (log link binomial family)
+    after residualizing y_gap_corrected against delta_time.
+    
+    Parameters
+    ----------
+    X : pd.DataFrame
+        DataFrame with predictor features.
+    y_gap_corrected : array-like
+        Gap corrected values to be residualized.
+    delta_time : array-like
+        Time variable for residualization.
+    covars : pd.DataFrame or pd.Series or list, optional
+        Covariates to include in the models.
+    n_iterations : int, default=1000
+        Number of bootstrap iterations.
+    test_size : float, default=0.2
+        Test split proportion.
+    random_state : int, default=42
+        Seed for reproducibility.
+        
+    Returns
+    -------
+    df_results : pd.DataFrame
+        DataFrame with RR, 2.5% CI, 97.5% CI, z, p-val, and statistics.
+    """
+    from scipy.stats import norm
+    import statsmodels.api as sm
+    from sklearn.model_selection import train_test_split
+    from sklearn.preprocessing import MinMaxScaler
+    
+    y_gap_corrected = np.asarray(y_gap_corrected)
+    delta_time = np.asarray(delta_time)
+    
+    # Residualize y_gap_corrected against delta_time
+    X_resid = sm.add_constant(delta_time)
+    resid_model = sm.OLS(y_gap_corrected, X_resid).fit()
+    resid = resid_model.resid
+    
+    # Define binary GAP outcome as Series aligned with X
+    y_bin = pd.Series(np.where(resid > 0, 1, 0), index=X.index)
+    
+    df_results = pd.DataFrame()
+    
+    # Process covariates
+    if covars is not None:
+        if isinstance(covars, (pd.DataFrame, pd.Series)):
+            df_cov = pd.DataFrame(covars)
+        else:
+            df_cov = pd.DataFrame(covars)
+    else:
+        df_cov = None
+        
+    for feature in X.columns:
+        rr_values = []
+        ci_low_values = []
+        ci_high_values = []
+        z_values = []
+        
+        # Prepare inputs
+        X_feat = X[[feature]].copy()
+        if df_cov is not None:
+            X_model = pd.concat([X_feat, df_cov], axis=1).dropna()
+            y_model = y_bin.loc[X_model.index]
+        else:
+            X_model = X_feat.dropna()
+            y_model = y_bin.loc[X_model.index]
+            
+        for iteration in range(n_iterations):
+            try:
+                X_train, X_test, y_train, y_test = train_test_split(
+                    X_model, y_model, test_size=test_size, random_state=random_state + iteration
+                )
+                
+                scaler = MinMaxScaler((0.05, 0.95))
+                X_train_scaled = pd.DataFrame(
+                    scaler.fit_transform(X_train),
+                    columns=X_train.columns,
+                    index=X_train.index
+                )
+                
+                X_train_scaled["intercept"] = 1
+                
+                # Fit GLM with binomial family and log link for Relative Risk
+                model = sm.GLM(
+                    y_train,
+                    X_train_scaled,
+                    family=sm.families.Binomial(link=sm.families.links.log())
+                ).fit(disp=0)
+                
+                params = model.params
+                conf = np.exp(model.conf_int())
+                conf["RR"] = np.exp(params)
+                conf["z"] = model.tvalues
+                conf["P>|z|"] = model.pvalues
+                conf.columns = ["2.5%", "97.5%", "RR", "z", "P>|z|"]
+                
+                rr_values.append(conf.loc[feature, "RR"])
+                ci_low_values.append(conf.loc[feature, "2.5%"])
+                ci_high_values.append(conf.loc[feature, "97.5%"])
+                z_values.append(conf.loc[feature, "z"])
+                
+            except Exception:
+                continue
+                
+        if len(rr_values) > 1:
+            rr_values = np.array(rr_values)
+            ci_low_values = np.array(ci_low_values)
+            ci_high_values = np.array(ci_high_values)
+            z_values = np.array(z_values)
+            
+            rr_mean = np.mean(rr_values)
+            ci_low_mean = np.mean(ci_low_values)
+            ci_high_mean = np.mean(ci_high_values)
+            z_mean_original = np.mean(z_values)
+            
+            # P-value calculation from combined effect and CI
+            if rr_mean > 0 and ci_low_mean > 0 and ci_high_mean > 0:
+                se_log_effect = (np.log(ci_high_mean) - np.log(ci_low_mean)) / (2 * 1.96)
+                if se_log_effect > 0:
+                    z_combined = np.log(rr_mean) / se_log_effect
+                    p_combined = 2 * (1 - norm.cdf(abs(z_combined)))
+                else:
+                    z_combined = np.nan
+                    p_combined = np.nan
+            else:
+                z_combined = np.nan
+                p_combined = np.nan
+        else:
+            ci_low_mean = np.nan
+            ci_high_mean = np.nan
+            rr_mean = np.nan
+            z_combined = np.nan
+            p_combined = np.nan
+            z_mean_original = np.nan
+            
+        df_temp = pd.DataFrame({
+            "Feature": [feature],
+            "2.5%": [ci_low_mean],
+            "97.5%": [ci_high_mean],
+            "RR": [rr_mean],
+            "z": [z_combined],
+            "P>|z|": [f"{p_combined:.2e}" if not np.isnan(p_combined) else np.nan],
+            "z_mean_original": [z_mean_original],
+            "n_iterations_ok": [len(rr_values)]
+        })
+        df_results = pd.concat([df_results, df_temp], ignore_index=True)
+        
+    return df_results
+
+

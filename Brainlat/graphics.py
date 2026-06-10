@@ -323,3 +323,172 @@ def plot_diagnostic_panel(y_true, y_pred, coef_df=None, figsize=(15, 10)):
     plt.tight_layout()
     
     return fig, axes
+
+
+def plot_delta_aic_comparison(predictors, delta_aics, ci_errors, pvals, mdes, category_title, filename=None):
+    """
+    Plot horizontal bar chart for Delta AIC comparisons with error bars.
+    
+    Parameters
+    ----------
+    predictors : list of str
+        Predictor names.
+    delta_aics : list of float
+        Delta AIC values.
+    ci_errors : array-like, shape (2, n_predictors)
+        Error bars: [delta_aic - lower_ci, upper_ci - delta_aic].
+    pvals : list of float
+        P-values.
+    mdes : list of float
+        MDE values.
+    category_title : str
+        Title category (e.g. 'Social Exposomes').
+    filename : str, optional
+        Filename to save plot (formats derived: .svg, .png, .pdf).
+    """
+    import matplotlib.pyplot as plt
+    import os
+    
+    plt.figure(figsize=(12, 8))
+    
+    # Plot horizontal bars
+    bars = plt.barh(predictors[::-1], delta_aics[::-1], color='skyblue', xerr=ci_errors[:, ::-1], capsize=5)
+    plt.xlabel('Delta AIC')
+    plt.title(f'{category_title} - Model Comparison by Delta AIC')
+    plt.subplots_adjust(left=0.4)
+    
+    # Legend with metrics
+    legend_entries = []
+    for pred, d_aic, ci_err_col, p_val, mde in zip(predictors, delta_aics, ci_errors.T, pvals, mdes):
+        p_str = '<0.001' if p_val < 0.001 else f"{p_val:.4f}"
+        low_ci = d_aic - ci_err_col[0]
+        high_ci = d_aic + ci_err_col[1]
+        stats_text = f"{pred}\nMDE: {mde:.4f}\nDelta AIC: {d_aic:.2f} [{low_ci:.2f}, {high_ci:.2f}]\np-value: {p_str}"
+        legend_entries.append(plt.Rectangle((0, 0), 1, 1, fc='skyblue', alpha=0.5, label=stats_text))
+        
+    plt.legend(handles=legend_entries, bbox_to_anchor=(1.05, 1), loc='upper left', borderaxespad=0.)
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    
+    if filename:
+        base, _ = os.path.splitext(filename)
+        for ext in ['.png', '.svg', '.pdf']:
+            plt.savefig(base + ext, format=ext.replace('.', ''), bbox_inches='tight')
+    plt.close()
+
+
+def plot_gam_combined_curves(gams_info, outcome, show_ci=True, normalize=True, filename=None):
+    """
+    Plot combined GAM curves for multiple predictors.
+    
+    Parameters
+    ----------
+    gams_info : list of dict
+        Each dict contains keys: 'predictor_name', 'X_plot', 'y_plot', 'XX_plot', 'y_pred_plot',
+        'y_lower_plot', 'y_upper_plot', 'delta_aic', 'p_value'
+    outcome : str
+        Outcome variable name (e.g. 'BAG').
+    show_ci : bool, default=True
+        Whether to plot confidence interval bands.
+    normalize : bool, default=True
+        Whether data is normalized.
+    filename : str, optional
+        Filename to save plot.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    markers = ['o', 's', '^', 'D', 'v', 'P', '*', 'X', 'h', '+']
+    colors = plt.cm.tab10.colors
+    
+    fig, ax = plt.subplots(figsize=(8, 8))
+    
+    for i, res in enumerate(gams_info):
+        pred_name = res['predictor_name']
+        color = colors[i % len(colors)]
+        marker = markers[i % len(markers)]
+        
+        X_plot = np.asarray(res['X_plot'])
+        y_plot = np.asarray(res['y_plot'])
+        XX_plot = np.asarray(res['XX_plot'])
+        y_pred_plot = np.asarray(res['y_pred_plot'])
+        y_lower_plot = np.asarray(res['y_lower_plot'])
+        y_upper_plot = np.asarray(res['y_upper_plot'])
+        
+        p_val = res['p_value']
+        p_value_str = '<0.001' if p_val < 0.001 else f"{p_val:.4f}"
+        label = f"{pred_name} | ΔAIC: {res['delta_aic']:.2f} | p: {p_value_str}"
+        
+        # Scatter plot with horizontal jitter
+        jitter = np.random.uniform(-0.02, 0.02, size=len(X_plot))
+        ax.scatter(X_plot + jitter, y_plot, alpha=0.2, color=color, marker=marker, s=15)
+        ax.plot(XX_plot, y_pred_plot, color=color, linestyle='-', linewidth=2, label=label)
+        
+        if show_ci:
+            ax.fill_between(XX_plot, y_lower_plot, y_upper_plot, color=color, alpha=0.15)
+            
+    xlabel = 'Exposomes (normalized 0-1)' if normalize else 'Exposomes'
+    ylabel = f'{outcome} (normalized 0-1)' if normalize else outcome
+    
+    ax.set_xlabel(xlabel, fontsize=11)
+    ax.set_ylabel(ylabel, fontsize=11)
+    ax.legend(loc='best', fontsize=8)
+    ax.grid(False)
+    plt.tight_layout()
+    
+    if filename:
+        base, _ = os.path.splitext(filename)
+        for ext in ['.png', '.svg', '.pdf']:
+            plt.savefig(base + ext, format=ext.replace('.', ''), bbox_inches='tight')
+    plt.close()
+
+
+def plot_or_rr_forest(df_plot, effect_type='OR', filename=None):
+    """
+    Generate forest plot for Odds Ratios or Relative Risks.
+    
+    Parameters
+    ----------
+    df_plot : pd.DataFrame
+        DataFrame containing columns: 'Feature', effect_type ('OR' or 'RR'), '2.5%', '97.5%'
+    effect_type : str, default='OR'
+        Type of effect: 'OR' or 'RR'
+    filename : str, optional
+        Filename to save plot.
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import os
+    
+    plt.figure(figsize=(8, 6))
+    
+    # Reverse order to plot top feature at the top
+    df_plot = df_plot.iloc[::-1].reset_index(drop=True)
+    
+    features = df_plot['Feature']
+    effects = np.asarray(df_plot[effect_type], dtype=float)
+    lower = np.asarray(df_plot['2.5%'], dtype=float)
+    upper = np.asarray(df_plot['97.5%'], dtype=float)
+    
+    # Error bar values: (effect - lower, upper - effect)
+    xerr = np.array([effects - lower, upper - effects])
+    
+    plt.errorbar(effects, range(len(features)), xerr=xerr, fmt="none", c="k", capsize=5)
+    plt.scatter(effects, range(len(features)), color="red", zorder=10)
+    
+    plt.yticks(range(len(features)), features)
+    plt.axvline(x=1.0, color="red", linestyle="--", linewidth=1.5)
+    
+    plt.xlabel(f"{effect_type} Value")
+    plt.ylabel("Features")
+    plt.title(f"{effect_type} Forest Plot [95% CI]")
+    plt.grid(True, linestyle=":", alpha=0.6)
+    plt.tight_layout()
+    
+    if filename:
+        base, _ = os.path.splitext(filename)
+        for ext in ['.png', '.svg', '.pdf']:
+            plt.savefig(base + ext, format=ext.replace('.', ''), bbox_inches='tight')
+    plt.close()
+

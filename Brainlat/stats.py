@@ -396,3 +396,89 @@ def hosmer_lemeshow(observed, predicted_probs, n_repeats=100, n_groups=10, test_
         'all_hl_stats': hl_stats,
         'all_p_values': p_values
     }
+
+
+def calculate_delta_aic(y_true, y_pred, k):
+    """
+    Calculate delta AIC between the fitted model and a null model.
+    
+    Parameters
+    ----------
+    y_true : array-like
+        True target values
+    y_pred : array-like
+        Predicted target values
+    k : int
+        Number of parameters (features) in the model
+        
+    Returns
+    -------
+    delta_aic : float
+        Difference: null_aic - model_aic. Larger positive values indicate better fit.
+    """
+    y_true = np.asarray(y_true)
+    y_pred = np.asarray(y_pred)
+    
+    rss = np.sum((y_true - y_pred) ** 2)
+    n = len(y_true)
+    if rss <= 0 or n <= 0:
+        return -np.inf
+    
+    aic = n * np.log(rss / n) + 2 * k
+    
+    null_rss = np.sum((y_true - y_true.mean()) ** 2)
+    if null_rss <= 0:
+        null_aic = 2
+    else:
+        null_aic = n * np.log(null_rss / n) + 2
+        
+    return null_aic - aic
+
+
+def bootstrap_delta_aic(y_true, predictions, k, n_bootstrap=1000, ci=80, random_state=42):
+    """
+    Calculate confidence interval for delta AIC using bootstrapping.
+    
+    Parameters
+    ----------
+    y_true : array-like
+        True target values
+    predictions : array-like
+        Predicted values
+    k : int
+        Number of parameters in the model
+    n_bootstrap : int, default=1000
+        Number of bootstrap iterations
+    ci : int, default=80
+        Confidence interval percentile (e.g. 80 for 80% CI, 95 for 95% CI)
+    random_state : int, default=42
+        Seed for reproducibility
+        
+    Returns
+    -------
+    mean_delta : float
+        Mean delta AIC across bootstrap samples
+    ci_bounds : tuple
+        (lower_bound, upper_bound) at the specified confidence level
+    """
+    y_true = np.asarray(y_true)
+    predictions = np.asarray(predictions)
+    
+    rng = np.random.default_rng(random_state)
+    bootstrapped_deltas = []
+    n_samples = len(y_true)
+    
+    for _ in range(n_bootstrap):
+        indices = rng.choice(n_samples, size=n_samples, replace=True)
+        y_sample = y_true[indices]
+        pred_sample = predictions[indices]
+        bootstrapped_deltas.append(calculate_delta_aic(y_sample, pred_sample, k))
+        
+    lower_pct = (100 - ci) / 2
+    upper_pct = 100 - lower_pct
+    
+    lower_bound = np.percentile(bootstrapped_deltas, lower_pct)
+    upper_bound = np.percentile(bootstrapped_deltas, upper_pct)
+    
+    return float(np.mean(bootstrapped_deltas)), (float(lower_bound), float(upper_bound))
+

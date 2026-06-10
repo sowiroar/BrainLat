@@ -259,7 +259,7 @@ class Logger:
                     f.write(err + "\n")
                 f.write("\n")
         
-        print(f"\n✓ Log saved to: {filepath}")
+        print(f"\n[Saved] Log saved to: {filepath}")
 
 
 def generate_sanity_report(diagnostics_report, filename=None):
@@ -311,7 +311,7 @@ def generate_sanity_report(diagnostics_report, filename=None):
             lines.append(f"  {col}: {info['count']} ({info['percentage']:.2f}%)")
             total_missing += info['count']
     if total_missing == 0:
-        lines.append("  No missing values detected ✓")
+        lines.append("  No missing values detected [OK]")
     lines.append("")
     
     # Outliers
@@ -324,7 +324,7 @@ def generate_sanity_report(diagnostics_report, filename=None):
             lines.append(f"  {col}: {info['count']} ({info['percentage']:.2f}%) [{severity}]")
             total_outliers += info['count']
     if total_outliers == 0:
-        lines.append("  No significant outliers detected ✓")
+        lines.append("  No significant outliers detected [OK]")
     lines.append("")
     
     # Warnings and Errors
@@ -332,14 +332,14 @@ def generate_sanity_report(diagnostics_report, filename=None):
         lines.append("WARNINGS")
         lines.append("-" * 70)
         for warning in diagnostics_report['warnings']:
-            lines.append(f"  ⚠ {warning}")
+            lines.append(f"  [Warning] {warning}")
         lines.append("")
     
     if diagnostics_report['errors']:
         lines.append("ERRORS")
         lines.append("-" * 70)
         for error in diagnostics_report['errors']:
-            lines.append(f"  ✗ {error}")
+            lines.append(f"  [Error] {error}")
         lines.append("")
     
     # Target statistics
@@ -360,6 +360,6 @@ def generate_sanity_report(diagnostics_report, filename=None):
     if filename:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(report_str)
-        print(f"✓ Report saved to: {filename}")
+        print(f"[Saved] Report saved to: {filename}")
     
     return report_str

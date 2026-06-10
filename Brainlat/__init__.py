@@ -24,6 +24,7 @@ from . import tools
 from . import graphics
 from . import diagnostics
 from . import clasification_model
+from . import gam_model
 
 __all__ = [
     'age_gap_models',
@@ -33,4 +34,6 @@ __all__ = [
     'graphics',
     'diagnostics',
     'clasification_model',
+    'gam_model',
 ]
+
