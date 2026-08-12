@@ -468,3 +468,216 @@ def compute_relative_risks_bootstrap(X, y_gap_corrected, delta_time, covars=None
     return df_results
 
 
+def sequential_feature_selection(
+    X, y,
+    estimator=None,
+    k_features='best',
+    forward=True,
+    scoring='roc_auc',
+    cv=5,
+    n_jobs=-1,
+    test_size=0.1,
+    random_state=42,
+    stratify=True
+):
+    """
+    Sequential Feature Selection (SFS) using mlxtend.
+
+    Performs forward or backward sequential feature selection to find
+    the best subset of features that maximizes a scoring metric.
+
+    Parameters
+    ----------
+    X : pd.DataFrame, shape (n_samples, n_features)
+        Feature matrix.
+    y : array-like, shape (n_samples,)
+        Target variable.
+    estimator : sklearn estimator or None, default=None
+        Base estimator for feature selection. If None, defaults to
+        XGBClassifier with default parameters.
+    k_features : int or str, default='best'
+        Number of features to select. Use 'best' to auto-select the
+        optimal number, or an integer for a specific count.
+    forward : bool, default=True
+        If True, performs forward selection. If False, backward elimination.
+    scoring : str, default='roc_auc'
+        Scoring metric (any sklearn scorer string). Common choices:
+        'roc_auc', 'accuracy', 'f1', 'r2', 'neg_mean_squared_error'.
+    cv : int, default=5
+        Number of cross-validation folds.
+    n_jobs : int, default=-1
+        Number of parallel jobs. -1 uses all cores.
+    test_size : float, default=0.1
+        Proportion held out as test set before selection.
+    random_state : int, default=42
+        Random seed for reproducibility.
+    stratify : bool, default=True
+        Whether to stratify the train/test split by y.
+
+    Returns
+    -------
+    results : dict
+        Dictionary containing:
+        - 'selected_features' : list of str
+            Names of selected features.
+        - 'n_features' : int
+            Number of selected features.
+        - 'metric_dict' : dict
+            Per-step metrics from SFS (can be used with
+            mlxtend's plot_sequential_feature_selection).
+        - 'best_score' : float
+            Best CV score achieved.
+
+    Examples
+    --------
+    >>> from brainlat.tools import sequential_feature_selection
+    >>> import pandas as pd, numpy as np
+    >>> X = pd.DataFrame(np.random.randn(200, 10), columns=[f'f{i}' for i in range(10)])
+    >>> y = np.random.randint(0, 2, 200)
+    >>> results = sequential_feature_selection(X, y, scoring='roc_auc')
+    >>> print(f"Selected: {results['selected_features']}")
+
+    Notes
+    -----
+    Requires: pip install mlxtend xgboost
+    """
+    from mlxtend.feature_selection import SequentialFeatureSelector as SFS
+    from sklearn.model_selection import train_test_split as tts
+
+    # Default estimator
+    if estimator is None:
+        from xgboost import XGBClassifier
+        estimator = XGBClassifier(
+            use_label_encoder=False,
+            eval_metric='logloss',
+            random_state=random_state
+        )
+
+    # Stratified split
+    stratify_arg = y if stratify else None
+    X_train, X_test, y_train, y_test = tts(
+        X, y, test_size=test_size,
+        random_state=random_state, stratify=stratify_arg
+    )
+
+    # Sequential Feature Selection
+    sfs = SFS(
+        estimator,
+        k_features=k_features,
+        forward=forward,
+        scoring=scoring,
+        cv=cv,
+        n_jobs=n_jobs
+    )
+
+    sfs.fit(X_train, y_train)
+
+    selected_features = list(sfs.k_feature_names_)
+    metric_dict = sfs.get_metric_dict()
+
+    # Find best score
+    best_score = max(
+        v['avg_score'] for v in metric_dict.values()
+    ) if metric_dict else 0.0
+
+    return {
+        'selected_features': selected_features,
+        'n_features': len(selected_features),
+        'metric_dict': metric_dict,
+        'best_score': best_score
+    }
+
+
+def compute_sfs_bootstrap_frequency(
+    X, y,
+    estimator=None,
+    n_iterations=100,
+    k_features='best',
+    forward=True,
+    scoring='r2',
+    cv=5,
+    n_jobs=-1,
+    random_state=42
+):
+    """
+    Run Sequential Feature Selection (SFS) iteratively over multiple bootstrap samples
+    to compute feature selection frequencies (Stability Selection).
+
+    Parameters
+    ----------
+    X : pd.DataFrame
+        Feature matrix.
+    y : pd.Series or array-like
+        Target variable.
+    estimator : sklearn estimator, optional
+        Estimator to use for feature selection. If None, defaults to HistGradientBoostingRegressor.
+    n_iterations : int, default=100
+        Number of bootstrap iterations.
+    k_features : int or str, default='best'
+        Number of features to select in each SFS iteration.
+    forward : bool, default=True
+        Whether to perform forward selection.
+    scoring : str, default='r2'
+        Scoring metric for SFS.
+    cv : int, default=5
+        Cross-validation folds for SFS evaluation.
+    n_jobs : int, default=-1
+        Number of parallel jobs to use.
+    random_state : int, default=42
+        Seed for reproducibility.
+
+    Returns
+    -------
+    df_freq : pd.DataFrame
+        DataFrame containing features and their selection frequency, sorted in descending order.
+    """
+    from mlxtend.feature_selection import SequentialFeatureSelector as SFS
+    from sklearn.ensemble import HistGradientBoostingRegressor
+    import numpy as np
+
+    if estimator is None:
+        estimator = HistGradientBoostingRegressor(random_state=random_state)
+
+    rng = np.random.default_rng(random_state)
+    feature_counts = {col: 0 for col in X.columns}
+    n_samples = len(X)
+
+    for i in range(n_iterations):
+        # Generate bootstrap sample
+        boot_indices = rng.choice(n_samples, size=n_samples, replace=True)
+        
+        # Handle pandas dataframe/series slicing safely
+        if isinstance(X, pd.DataFrame):
+            X_boot = X.iloc[boot_indices]
+        else:
+            X_boot = np.asarray(X)[boot_indices]
+            
+        if isinstance(y, (pd.Series, pd.DataFrame)):
+            y_boot = y.iloc[boot_indices]
+        else:
+            y_boot = np.asarray(y)[boot_indices]
+
+        sfs = SFS(
+            estimator,
+            k_features=k_features,
+            forward=forward,
+            floating=False,
+            scoring=scoring,
+            cv=cv,
+            n_jobs=n_jobs,
+            verbose=0
+        )
+        sfs.fit(X_boot, y_boot)
+        for feat in sfs.k_feature_names_:
+            feature_counts[feat] += 1
+
+    df_freq = pd.DataFrame({
+        'Feature': list(feature_counts.keys()),
+        'Frequency': [count / n_iterations for count in feature_counts.values()]
+    }).sort_values(by='Frequency', ascending=False).reset_index(drop=True)
+
+    return df_freq
+
+
+
+

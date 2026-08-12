@@ -482,3 +482,215 @@ def bootstrap_delta_aic(y_true, predictions, k, n_bootstrap=1000, ci=80, random_
     
     return float(np.mean(bootstrapped_deltas)), (float(lower_bound), float(upper_bound))
 
+
+def exploratory_factor_analysis(X, n_factors=10, rotation='varimax', scale=True):
+    """
+    Perform Exploratory Factor Analysis (EFA).
+
+    Fits an EFA model using the FactorAnalyzer library, computes eigenvalues,
+    determines the optimal number of factors (eigenvalue > 1), and returns
+    the factor loadings matrix.
+
+    Parameters
+    ----------
+    X : pd.DataFrame or np.ndarray, shape (n_samples, n_features)
+        Feature matrix. If DataFrame, column names are used as labels.
+    n_factors : int, default=10
+        Number of factors to extract. Should be larger than expected
+        optimal number for initial exploration.
+    rotation : str, default='varimax'
+        Rotation method: 'varimax', 'promax', 'oblimin', 'oblimax',
+        'quartimin', 'quartimax', 'equamax', or None.
+    scale : bool, default=True
+        Whether to apply MinMaxScaler (0.05, 0.95) before fitting.
+
+    Returns
+    -------
+    results : dict
+        Dictionary containing:
+        - 'eigenvalues' : np.ndarray
+            Eigenvalues for all components.
+        - 'n_optimal' : int
+            Number of factors with eigenvalue > 1 (Kaiser criterion).
+        - 'loadings' : pd.DataFrame
+            Factor loadings matrix with features as rows and factors as columns.
+        - 'variance_explained' : np.ndarray
+            Proportion of variance explained by each factor.
+
+    Examples
+    --------
+    >>> from brainlat.stats import exploratory_factor_analysis
+    >>> import pandas as pd, numpy as np
+    >>> X = pd.DataFrame(np.random.randn(200, 20), columns=[f'v{i}' for i in range(20)])
+    >>> results = exploratory_factor_analysis(X, n_factors=10)
+    >>> print(f"Optimal factors: {results['n_optimal']}")
+    >>> print(results['loadings'].head())
+
+    Notes
+    -----
+    Requires: pip install factor-analyzer
+    """
+    from factor_analyzer import FactorAnalyzer
+    from sklearn.preprocessing import MinMaxScaler
+
+    # Convert to array if needed, preserve column names
+    if isinstance(X, pd.DataFrame):
+        feature_names = list(X.columns)
+        X_values = X.values
+    else:
+        feature_names = [f'Feature_{i}' for i in range(X.shape[1])]
+        X_values = np.asarray(X)
+
+    # Scale if requested
+    if scale:
+        scaler = MinMaxScaler((0.05, 0.95))
+        X_scaled = scaler.fit_transform(X_values)
+    else:
+        X_scaled = X_values.copy()
+
+    # Fit factor analyzer
+    fa = FactorAnalyzer()
+    fa.set_params(n_factors=n_factors, rotation=rotation)
+    fa.fit(X_scaled)
+
+    # Get eigenvalues
+    eigenvalues, _ = fa.get_eigenvalues()
+
+    # Optimal number of factors (Kaiser criterion: eigenvalue > 1)
+    n_optimal_arr = np.where(eigenvalues <= 1)[0]
+    n_optimal = n_optimal_arr[0] if len(n_optimal_arr) > 0 else n_factors
+
+    # Get loadings as DataFrame
+    loadings = np.abs(fa.loadings_)
+    factor_names = [f'Factor {i+1}' for i in range(n_factors)]
+    loadings_df = pd.DataFrame(
+        loadings, index=feature_names, columns=factor_names
+    )
+
+    # Variance explained
+    variance = fa.get_factor_variance()
+    # variance returns (SS Loadings, Proportion Var, Cumulative Var)
+    variance_explained = variance[1] if len(variance) > 1 else np.array([])
+
+    return {
+        'eigenvalues': eigenvalues,
+        'n_optimal': int(n_optimal),
+        'loadings': loadings_df,
+        'variance_explained': variance_explained
+    }
+
+
+def get_efa_clusters(loadings_df, threshold=0.75, n_factors=None):
+    """
+    Group variables into factor clusters based on loading threshold.
+
+    Given a loadings DataFrame from EFA, assigns each variable to the
+    factor where its loading exceeds the threshold.
+
+    Parameters
+    ----------
+    loadings_df : pd.DataFrame
+        Factor loadings matrix with features as rows, factors as columns.
+        Typically from ``exploratory_factor_analysis()['loadings']``.
+    threshold : float, default=0.75
+        Minimum loading value to assign a variable to a factor.
+    n_factors : int or None, default=None
+        Number of factors to consider. If None, uses all columns.
+
+    Returns
+    -------
+    clusters : list of list of str
+        List where clusters[i] contains the variable names assigned to
+        factor i. Empty list if no variables exceed the threshold.
+    all_features : list of str
+        Flat list of all selected features across all factors.
+    cluster_dict : dict
+        Dictionary mapping factor index (int) to list of variable names.
+        Only includes factors with at least one variable.
+
+    Examples
+    --------
+    >>> from brainlat.stats import exploratory_factor_analysis, get_efa_clusters
+    >>> results = exploratory_factor_analysis(X, n_factors=10)
+    >>> clusters, features, cdict = get_efa_clusters(results['loadings'], threshold=0.6)
+    >>> for i, c in enumerate(clusters):
+    ...     if c:
+    ...         print(f"Factor {i+1}: {c}")
+    """
+    if loadings_df is None or loadings_df.empty:
+        return [], [], {}
+
+    if n_factors is None:
+        n_factors = loadings_df.shape[1]
+    else:
+        n_factors = min(n_factors, loadings_df.shape[1])
+
+    clusters = []
+    cluster_dict = {}
+
+    for i in range(n_factors):
+        col = loadings_df.iloc[:, i]
+        selected = list(loadings_df[col > threshold].index)
+
+        clusters.append(selected)
+        if len(selected) > 0:
+            cluster_dict[i] = selected
+
+    # Flat list of all selected features
+    all_features = []
+    for cluster in clusters:
+        all_features.extend(cluster)
+
+    return clusters, all_features, cluster_dict
+
+
+def fit_cox_model(df, duration_col, event_col, formula=None, covariates=None, alpha=0.05):
+    """
+    Fit a Cox Proportional Hazards regression model using lifelines.
+    Automatically performs a test of proportional hazards assumption using Schoenfeld residuals.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Dataset containing the variables.
+    duration_col : str
+        Name of the column containing the duration/time-to-event values.
+    event_col : str
+        Name of the column containing the binary event-observed indicators (1 if event, 0 if censored).
+    formula : str, optional
+        A patsy formula to specify covariates (e.g. "Age + Sex + GAP_corrected").
+    covariates : list of str, optional
+        List of column names to include as covariates in the model. Ignored if formula is provided.
+    alpha : float, default=0.05
+        Significance level for the proportional hazards test.
+
+    Returns
+    -------
+    cph : CoxPHFitter
+        The fitted lifelines CoxPHFitter model.
+    ph_test : StatisticalResult
+        StatisticalResult object containing the proportional hazards test results 
+        (chi-squared statistics, p-values, degrees of freedom).
+    """
+    from lifelines import CoxPHFitter
+    from lifelines.statistics import proportional_hazard_test
+    import pandas as pd
+
+    cph = CoxPHFitter()
+
+    if formula is not None:
+        cph.fit(df, duration_col=duration_col, event_col=event_col, formula=formula)
+    else:
+        columns_to_include = [duration_col, event_col]
+        if covariates is not None:
+            columns_to_include.extend(covariates)
+        df_model = df[columns_to_include].dropna()
+        cph.fit(df_model, duration_col=duration_col, event_col=event_col)
+
+    # Check proportional hazards assumption using Schoenfeld residuals
+    ph_test = proportional_hazard_test(cph, df, time_transform='rank')
+
+    return cph, ph_test
+
+
+

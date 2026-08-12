@@ -437,3 +437,214 @@ def Regression_NonLinear_NestedCV(
         logger.save('nonlinear_nestedcv_regression')
 
     return [coef_df.fillna(''), results_labels_df, best_params_list]
+
+
+def Regression_XGB(X, y, min_iter=1, max_iter=2, n_splits=10, log=False):
+    """
+    XGBoost Regressor with K-Fold cross-validation (no gap correction).
+
+    Implements a non-linear XGBoost regression model with K-Fold CV.
+    Uses feature importances instead of coefficients. This is equivalent
+    to Regression_NonLinear_NestedCV but without Bayesian hyperparameter
+    tuning — uses default XGBRegressor parameters for simplicity.
+
+    Parameters
+    ----------
+    X : pd.DataFrame, shape (n_samples, n_features)
+        Feature matrix with feature names as columns.
+    y : array-like, shape (n_samples,)
+        Target variable.
+    min_iter : int, default=1
+        Minimum iteration number for random state variation.
+    max_iter : int, default=2
+        Maximum iteration number (exclusive).
+    n_splits : int, default=10
+        Number of KFold splits for cross-validation.
+    log : bool, default=False
+        Whether to save logs and diagnostic reports to files.
+
+    Returns
+    -------
+    results : list
+        [coef_df, r_squared, results_labels_df]
+
+        - coef_df : pd.DataFrame
+            Feature importances and model statistics.
+            Index row 'Model' has aggregate metrics (R², F, etc.).
+        - r_squared : float
+            Overall R² across all folds.
+        - results_labels_df : pd.DataFrame
+            Predictions for each sample with columns
+            ['ID', 'y_labels', 'y_pred'].
+
+    Examples
+    --------
+    >>> from brainlat.regresion_model import Regression_XGB
+    >>> import pandas as pd, numpy as np
+    >>> X = pd.DataFrame(np.random.randn(100, 5), columns=[f'f{i}' for i in range(5)])
+    >>> y = np.random.randn(100)
+    >>> coef_df, r2, pred_df = Regression_XGB(X, y, n_splits=5, log=True)
+    """
+    from xgboost import XGBRegressor
+
+    # Initialize logger if needed
+    logger = Logger() if log else None
+
+    if logger:
+        logger.add_message("Starting XGB regression analysis...")
+
+    # Perform sanity checks
+    diagnostics = DataDiagnostics()
+    report = diagnostics.check_data_quality(X, y, name="XGB Regression Input")
+
+    if log:
+        report_str = generate_sanity_report(
+            report, filename="brainlat_logs/xgb_regression_sanity_check.txt"
+        )
+        print("\n" + report_str)
+        logger.add_message(
+            f"Data quality check completed: {report['n_samples']} samples, "
+            f"{report['n_features']} features"
+        )
+    else:
+        report_str = generate_sanity_report(report)
+        print("\n" + report_str)
+
+    y = np.array(y)
+    lista_vars = list(X.columns)
+    n_vars = len(lista_vars)
+
+    results_df_all = pd.DataFrame()
+    r_squared_final = 0
+
+    for iteration in range(min_iter, max_iter):
+        y_labels = []
+        y_predicts = []
+
+        y_pred_cv = []
+        y_test_cv = []
+        r_squared_l = []
+        mse_l = []
+        rmse_l = []
+
+        results_labels_df = pd.DataFrame(columns=['y_labels', 'y_pred', 'ID'])
+
+        coef_array = np.zeros([n_vars + 1, n_splits])
+
+        kf = KFold(n_splits=n_splits, shuffle=True, random_state=iteration)
+
+        iter_split = 0
+        for train_index, test_index in kf.split(X):
+            X_train_raw, X_test_raw = X.iloc[train_index, :], X.iloc[test_index, :]
+            y_train, y_test = y[train_index], y[test_index]
+
+            # Scale within the fold to avoid data leakage
+            scaler = MinMaxScaler((0.05, 0.95))
+            X_train = pd.DataFrame(
+                scaler.fit_transform(X_train_raw),
+                columns=X_train_raw.columns, index=X_train_raw.index
+            )
+            X_test = pd.DataFrame(
+                scaler.transform(X_test_raw),
+                columns=X_test_raw.columns, index=X_test_raw.index
+            )
+
+            model = XGBRegressor(
+                objective='reg:squarederror', random_state=42
+            )
+            model.fit(X_train, y_train)
+
+            # Store feature importances (intercept = NaN for non-linear)
+            coef_array[0, iter_split] = np.nan
+            coef_array[1::, iter_split] = np.array(model.feature_importances_)
+
+            predicted_values = model.predict(X_test)
+
+            y_labels.extend(list(y_test))
+            y_predicts.extend(list(predicted_values))
+
+            r_squared_l.append(r2_score(y_test, predicted_values))
+            mse_l.append(
+                np.round(mean_squared_error(y_test, predicted_values), 6)
+            )
+            rmse_l.append(
+                np.round(
+                    math.sqrt(mean_squared_error(y_test, predicted_values)), 6
+                )
+            )
+
+            result = np.column_stack((y_test, predicted_values))
+            temp_df = pd.DataFrame(result, columns=['y_labels', 'y_pred'])
+            temp_df['ID'] = X_test.index
+
+            results_labels_df = pd.concat(
+                [results_labels_df, temp_df], ignore_index=True
+            )
+
+            iter_split += 1
+
+        # Aggregate cross-validation results
+        n = len(y_predicts)
+        p = X.shape[1]
+        r_squared = r2_score(y_labels, y_predicts)
+        r_squared_final = r_squared
+
+        k = p - 1
+        r_squared_adj = 1 - (1 - r_squared) * (n - 1) / (n - k - 1)
+
+        mse = np.round(mean_squared_error(y_labels, y_predicts), 6)
+        rmse = np.round(math.sqrt(mean_squared_error(y_labels, y_predicts)), 6)
+
+        # F-statistic (corrected: use r_squared and p as df1)
+        if (1 - r_squared) > 0:
+            F = (r_squared / p) / ((1 - r_squared) / (n - p - 1))
+            p_value = np.round(scipy.stats.f.sf(F, p, (n - p - 1)), 15)
+            F2 = r_squared / (1 - r_squared)
+        else:
+            F = np.inf
+            p_value = 0.0
+            F2 = np.inf
+
+        # Diagnostic metrics
+        mda = mean_directional_accuracy(y_labels, y_predicts)
+        mae = mean_absolute_error_custom(y_labels, y_predicts)
+
+        # Calculate mean importances
+        coef_array_mean = np.zeros([n_vars + 1, 1])
+        coef_array_std = np.zeros([n_vars + 1, 1])
+
+        for j in range(n_vars + 1):
+            coef_array_mean[j] = coef_array[j, :].mean()
+            coef_array_std[j] = coef_array[j, :].std()
+
+        coef_df = pd.DataFrame(
+            index=['Model'] + lista_vars,
+            columns=['Feature_Importance_mean', 'Feature_Importance_std']
+        )
+
+        coef_df['Feature_Importance_mean'] = coef_array_mean
+        coef_df['Feature_Importance_std'] = coef_array_std
+
+        coef_df.loc['Model', 'R2'] = r_squared
+        coef_df.loc['Model', 'R2 adj'] = r_squared_adj
+        coef_df.loc['Model', 'R2 [+-]'] = 1 * np.std(r_squared_l)
+        coef_df.loc['Model', 'F2'] = F2
+        coef_df.loc['Model', 'mse'] = mse
+        coef_df.loc['Model', 'mse [+-]'] = 1 * np.std(mse_l)
+        coef_df.loc['Model', 'rmse'] = rmse
+        coef_df.loc['Model', 'rmse [+-]'] = 1 * np.std(rmse_l)
+        coef_df.loc['Model', 'outcome var'] = np.var(y)
+        coef_df.loc['Model', 'F'] = F
+        coef_df.loc['Model', 'F-p_value'] = p_value
+        coef_df.loc['Model', 'MDE'] = mda
+        coef_df.loc['Model', 'MAE'] = mae
+
+    if logger:
+        logger.add_message(
+            f"XGB Regression completed with R² = {r_squared_final:.4f}"
+        )
+        logger.save('xgb_regression')
+
+    results_labels_df = results_labels_df[['ID', 'y_labels', 'y_pred']]
+
+    return [coef_df, r_squared_final, results_labels_df]
